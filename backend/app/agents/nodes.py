@@ -1,23 +1,36 @@
 from .state import AgentState
 from ..tools.scholarship_search import search_scholarships
+from ..config.llm import get_llm
+
+# Single shared LLM instance
+llm = get_llm(temperature=0.2)
 
 
-# ---------- Node 1: Classify intent ----------
+# ---------- Node 1: Gemini intent classifier ----------
 def classifier_node(state: AgentState):
-    goal = state["user_goal"].lower()
+    goal = state["user_goal"]
 
-    if any(kw in goal for kw in ["scholarship", "find", "search", "funding"]):
-        intent = "scholarship_search"
-        needs_tool = True
-        tool_name = "scholarship_search"
-    elif any(kw in goal for kw in ["plan", "roadmap", "prepare"]):
-        intent = "planning"
-        needs_tool = False
-        tool_name = None
-    else:
+    prompt = f"""You are the intent classifier for ScholarMate AI, a scholarship assistant.
+
+Classify the user's goal into EXACTLY ONE of these intents:
+- "scholarship_search" : user wants to find, search, or discover scholarships
+- "planning"           : user wants a plan, roadmap, timeline, or preparation steps
+- "general"            : anything else (greeting, unclear, or unrelated)
+
+Return ONLY the intent word. No explanation. No punctuation. No quotes.
+
+User goal: {goal}
+Intent:"""
+
+    response = llm.invoke(prompt)
+    intent = response.content.strip().lower()
+
+    # Sanitize — if Gemini returns something unexpected, fall back to general
+    if intent not in {"scholarship_search", "planning", "general"}:
         intent = "general"
-        needs_tool = False
-        tool_name = None
+
+    needs_tool = intent == "scholarship_search"
+    tool_name = "scholarship_search" if needs_tool else None
 
     return {
         "intent": intent,
@@ -32,33 +45,49 @@ def tool_node(state: AgentState):
         result = search_scholarships(state["user_goal"])
     else:
         result = "No tool executed."
-
     return {"tool_result": result}
 
 
-# ---------- Node 3: Planner ----------
+# ---------- Node 3: Gemini planner ----------
 def planner_node(state: AgentState):
     goal = state["user_goal"]
     intent = state.get("intent", "general")
-    return {
-        "plan": f"[{intent}] Build a plan for: {goal}"
-    }
+    tool_result = state.get("tool_result")
+
+    if tool_result:
+        prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
+
+Here are the scholarships found:
+{tool_result}
+
+Write a short, friendly response (3-5 sentences) that:
+1. Summarizes the scholarships found (name + deadline)
+2. Suggests the student pick one to focus on
+3. Offers to help with the application plan next
+
+Do NOT invent scholarships beyond the list above."""
+    else:
+        prompt = f"""You are ScholarMate AI, a scholarship application assistant.
+
+The student asked: "{goal}"
+
+Write a helpful, friendly response (3-5 sentences) that:
+1. Acknowledges their goal
+2. Gives 2-3 concrete next steps they can take
+3. Mentions you can help with scholarship search if they want
+
+Keep it short and encouraging. Do not invent specific scholarship names or deadlines."""
+
+    response = llm.invoke(prompt)
+    return {"plan": response.content.strip()}
 
 
-# ---------- Node 4: Response ----------
+# ---------- Node 4: Final response assembly ----------
 def response_node(state: AgentState):
-    parts = [f"Goal: {state['user_goal']}"]
-
-    if state.get("tool_result"):
-        parts.append(f"Tool result:\n{state['tool_result']}")
-
-    if state.get("plan"):
-        parts.append(f"Plan:\n{state['plan']}")
-
-    return {"final_response": "\n\n".join(parts)}
+    return {"final_response": state.get("plan", "No response generated.")}
 
 
-# ---------- Router (decides next node) ----------
+# ---------- Router (unchanged — still decides tool vs planner) ----------
 def route_after_classify(state: AgentState):
     if state.get("needs_tool"):
         return "tool"
