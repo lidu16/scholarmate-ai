@@ -11,16 +11,13 @@ from .nodes import (
 
 builder = StateGraph(AgentState)
 
-# Register nodes
 builder.add_node("classifier", classifier_node)
 builder.add_node("tool", tool_node)
 builder.add_node("planner", planner_node)
 builder.add_node("response", response_node)
 
-# Entry
 builder.add_edge(START, "classifier")
 
-# Conditional branching: tool vs planner
 builder.add_conditional_edges(
     "classifier",
     route_after_classify,
@@ -30,7 +27,6 @@ builder.add_conditional_edges(
     },
 )
 
-# Both branches converge into response
 builder.add_edge("tool", "planner")
 builder.add_edge("planner", "response")
 builder.add_edge("response", END)

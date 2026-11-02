@@ -1,12 +1,25 @@
+"""
+LangGraph nodes for ScholarMate AI.
+
+Flow:
+    classifier (Gemini)  →  [tool]  →  planner (Gemini)  →  response  →  END
+
+All nodes except `route_after_classify` are kept simple and defensive:
+LLM failures fall back to safe defaults so a single Gemini hiccup
+doesn't crash the whole request.
+"""
+
 from .state import AgentState
 from ..tools.scholarship_search import search_scholarships
 from ..config.llm import get_llm
 
-# Single shared LLM instance
+# Single shared LLM instance (temperature low for deterministic routing)
 llm = get_llm(temperature=0.2)
 
 
-# ---------- Node 1: Gemini intent classifier ----------
+# ---------------------------------------------------------------- #
+# Node 1 — Intent classifier (Gemini)
+# ---------------------------------------------------------------- #
 def classifier_node(state: AgentState):
     goal = state["user_goal"]
 
@@ -22,10 +35,13 @@ Return ONLY the intent word. No explanation. No punctuation. No quotes.
 User goal: {goal}
 Intent:"""
 
-    response = llm.invoke(prompt)
-    intent = response.content.strip().lower()
+    try:
+        response = llm.invoke(prompt)
+        intent = response.content.strip().lower()
+    except Exception:
+        intent = "general"
 
-    # Sanitize — if Gemini returns something unexpected, fall back to general
+    # Sanitize — if Gemini returns something unexpected, fall back safely
     if intent not in {"scholarship_search", "planning", "general"}:
         intent = "general"
 
@@ -39,16 +55,23 @@ Intent:"""
     }
 
 
-# ---------- Node 2: Run tool ----------
-def tool_node(state: AgentState):
-    if state["tool_name"] == "scholarship_search":
-        result = search_scholarships(state["user_goal"])
+# ---------------------------------------------------------------- #
+# Node 2 — Tool execution (async, MongoDB-backed)
+# ---------------------------------------------------------------- #
+async def tool_node(state: AgentState):
+    if state.get("tool_name") == "scholarship_search":
+        try:
+            result = await search_scholarships(state["user_goal"])
+        except Exception as e:
+            result = f"Scholarship search failed: {e}"
     else:
         result = "No tool executed."
     return {"tool_result": result}
 
 
-# ---------- Node 3: Gemini planner ----------
+# ---------------------------------------------------------------- #
+# Node 3 — Planner / response generator (Gemini)
+# ---------------------------------------------------------------- #
 def planner_node(state: AgentState):
     goal = state["user_goal"]
     intent = state.get("intent", "general")
@@ -57,7 +80,7 @@ def planner_node(state: AgentState):
     if tool_result:
         prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
 
-Here are the scholarships found:
+Here are the scholarships found in our database:
 {tool_result}
 
 Write a short, friendly response (3-5 sentences) that:
@@ -65,7 +88,8 @@ Write a short, friendly response (3-5 sentences) that:
 2. Suggests the student pick one to focus on
 3. Offers to help with the application plan next
 
-Do NOT invent scholarships beyond the list above."""
+Do NOT invent scholarships beyond the list above.
+Do NOT make up deadlines, amounts, or eligibility rules that are not in the list."""
     else:
         prompt = f"""You are ScholarMate AI, a scholarship application assistant.
 
@@ -76,19 +100,32 @@ Write a helpful, friendly response (3-5 sentences) that:
 2. Gives 2-3 concrete next steps they can take
 3. Mentions you can help with scholarship search if they want
 
-Keep it short and encouraging. Do not invent specific scholarship names or deadlines."""
+Keep it short and encouraging.
+Do not invent specific scholarship names or deadlines."""
 
-    response = llm.invoke(prompt)
-    return {"plan": response.content.strip()}
+    try:
+        response = llm.invoke(prompt)
+        plan_text = response.content.strip()
+    except Exception:
+        plan_text = (
+            "I'm having trouble generating a detailed response right now. "
+            "Please try again in a moment."
+        )
+
+    return {"plan": plan_text}
 
 
-# ---------- Node 4: Final response assembly ----------
+# ---------------------------------------------------------------- #
+# Node 4 — Final response assembly
+# ---------------------------------------------------------------- #
 def response_node(state: AgentState):
     return {"final_response": state.get("plan", "No response generated.")}
 
 
-# ---------- Router (unchanged — still decides tool vs planner) ----------
-def route_after_classify(state: AgentState):
+# ---------------------------------------------------------------- #
+# Conditional router — decides next node after classifier
+# ---------------------------------------------------------------- #
+def route_after_classify(state: AgentState) -> str:
     if state.get("needs_tool"):
         return "tool"
     return "planner"
