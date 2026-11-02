@@ -1,16 +1,37 @@
-from langgraph.graph import StateGraph
-from langgraph.graph import START, END
+from langgraph.graph import StateGraph, START, END
 
 from .state import AgentState
-from .nodes import planner_node
-from .nodes import response_node
+from .nodes import (
+    classifier_node,
+    tool_node,
+    planner_node,
+    response_node,
+    route_after_classify,
+)
 
 builder = StateGraph(AgentState)
 
+# Register nodes
+builder.add_node("classifier", classifier_node)
+builder.add_node("tool", tool_node)
 builder.add_node("planner", planner_node)
 builder.add_node("response", response_node)
 
-builder.add_edge(START, "planner")
+# Entry
+builder.add_edge(START, "classifier")
+
+# Conditional branching: tool vs planner
+builder.add_conditional_edges(
+    "classifier",
+    route_after_classify,
+    {
+        "tool": "tool",
+        "planner": "planner",
+    },
+)
+
+# Both branches converge into response
+builder.add_edge("tool", "planner")
 builder.add_edge("planner", "response")
 builder.add_edge("response", END)
 
