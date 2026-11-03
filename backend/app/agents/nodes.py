@@ -8,6 +8,8 @@ Flow:
         ├── application_plan    -> application_plan -> planner
         ├── track_application   -> tracker          -> planner
         ├── prepare_documents   -> checklist        -> planner
+        ├── write_essay         -> essay_draft      -> planner
+        ├── review_essay        -> essay_review     -> planner
         └── planning/general    ->                    planner
     planner -> response -> END
 """
@@ -17,7 +19,14 @@ from ..tools.scholarship_search import search_scholarships
 from ..services.eligibility import evaluate_eligibility
 from ..services.application_planner import build_application_plan
 from ..services.checklist import generate_checklist
-from ..services.applications import create_application, set_checklist
+from ..services.essay import generate_essay_draft, review_essay
+from ..services.applications import (
+    create_application,
+    set_checklist,
+    save_essay_draft,
+    save_essay_review,
+    get_application_by_id,
+)
 from ..database.connection import get_db
 from ..config.llm import get_llm
 
@@ -36,10 +45,10 @@ Classify the user's goal into EXACTLY ONE of these intents:
 - "scholarship_search" : user wants to find, search, or discover scholarships
 - "eligibility_check"  : user wants to know if they qualify / are eligible
 - "application_plan"   : user wants a plan, timeline, roadmap, or preparation steps
-                         to apply for a specific scholarship
 - "track_application"  : user wants to save, track, or follow an application
-- "prepare_documents"  : user wants to know which documents are needed,
-                         what to prepare, or a document checklist
+- "prepare_documents"  : user wants which documents are needed / a checklist
+- "write_essay"        : user wants to draft, write, or generate an SOP / essay / letter
+- "review_essay"       : user wants feedback, review, or critique on an existing essay
 - "planning"           : general application advice not tied to a scholarship
 - "general"            : anything else
 
@@ -60,6 +69,8 @@ Intent:"""
         "application_plan",
         "track_application",
         "prepare_documents",
+        "write_essay",
+        "review_essay",
         "planning",
         "general",
     }
@@ -72,14 +83,12 @@ Intent:"""
         "application_plan",
         "track_application",
         "prepare_documents",
+        "write_essay",
+        "review_essay",
     }
     tool_name = intent if needs_tool else None
 
-    return {
-        "intent": intent,
-        "needs_tool": needs_tool,
-        "tool_name": tool_name,
-    }
+    return {"intent": intent, "needs_tool": needs_tool, "tool_name": tool_name}
 
 
 # ---------------------------------------------------------------- #
@@ -309,10 +318,6 @@ async def tracker_node(state: AgentState):
 # Node 2e — Checklist
 # ---------------------------------------------------------------- #
 async def checklist_node(state: AgentState):
-    """
-    Generate a scholarship-specific document checklist and attach it
-    to the student's tracked application (creating the application if needed).
-    """
     db = get_db()
     if db is None:
         return {
@@ -388,6 +393,141 @@ async def checklist_node(state: AgentState):
 
 
 # ---------------------------------------------------------------- #
+# Node 2f — Essay draft
+# ---------------------------------------------------------------- #
+async def essay_draft_node(state: AgentState):
+    db = get_db()
+    if db is None:
+        return {
+            "essay_draft": None,
+            "application_record": {"error": "Database not connected."},
+        }
+
+    profile = state.get("student_profile")
+    if not profile:
+        return {
+            "essay_draft": None,
+            "application_record": {
+                "error": "No student profile — register first via POST /students.",
+            },
+        }
+
+    scholarship = state.get("target_scholarship")
+    if not scholarship:
+        goal = state["user_goal"]
+        try:
+            words = [w for w in goal.split() if len(w) > 3]
+            if words:
+                regex = "|".join(words)
+                scholarship = await db.scholarships.find_one(
+                    {"name": {"$regex": regex, "$options": "i"}},
+                    {"_id": 0},
+                )
+        except Exception:
+            scholarship = None
+
+    if not scholarship:
+        return {
+            "essay_draft": None,
+            "application_record": {
+                "error": "Could not identify the scholarship.",
+            },
+        }
+
+    profile_clean = {k: v for k, v in profile.items() if k != "_id"}
+    eligibility = state.get("eligibility")
+    if not eligibility:
+        eligibility = await evaluate_eligibility(profile_clean, scholarship)
+
+    draft = await generate_essay_draft(profile_clean, scholarship, eligibility)
+
+    application_record = state.get("application_record")
+    application_id = state.get("application_id")
+    if not application_record or application_record.get("error"):
+        application_record = await create_application(
+            student_email=profile_clean["email"],
+            scholarship=scholarship,
+            eligibility=eligibility,
+            application_plan=state.get("application_plan"),
+            status="preparing",
+        )
+        application_id = application_record.get("id")
+
+    if application_id:
+        updated = await save_essay_draft(application_id, draft)
+        if updated:
+            application_record = updated
+
+    return {
+        "student_profile": profile_clean,
+        "target_scholarship": scholarship,
+        "eligibility": eligibility,
+        "application_id": application_id,
+        "application_record": application_record,
+        "essay_draft": draft,
+    }
+
+
+# ---------------------------------------------------------------- #
+# Node 2g — Essay review
+# ---------------------------------------------------------------- #
+async def essay_review_node(state: AgentState):
+    db = get_db()
+    if db is None:
+        return {
+            "essay_review": None,
+            "application_record": {"error": "Database not connected."},
+        }
+
+    profile = state.get("student_profile")
+    scholarship = state.get("target_scholarship")
+
+    draft = state.get("essay_draft")
+
+    application_record = state.get("application_record")
+    application_id = state.get("application_id")
+    if not draft and application_id:
+        record = await get_application_by_id(application_id)
+        if record:
+            draft = record.get("essay_draft")
+            application_record = record
+
+    if not draft:
+        return {
+            "essay_review": None,
+            "application_record": {
+                "error": "No essay draft found — generate one first.",
+            },
+        }
+
+    if not scholarship:
+        return {
+            "essay_review": None,
+            "application_record": {
+                "error": "Could not identify the scholarship.",
+            },
+        }
+
+    review = await review_essay(
+        draft=draft,
+        scholarship=scholarship,
+        profile={k: v for k, v in (profile or {}).items() if k != "_id"},
+    )
+
+    if application_id:
+        updated = await save_essay_review(application_id, review)
+        if updated:
+            application_record = updated
+
+    return {
+        "application_id": application_id,
+        "application_record": application_record,
+        "essay_draft": draft,
+        "essay_review": review,
+    }
+
+
+# ---------------------------------------------------------------- #
 # Node 3 — Planner
 # ---------------------------------------------------------------- #
 def planner_node(state: AgentState):
@@ -397,9 +537,52 @@ def planner_node(state: AgentState):
     application_plan = state.get("application_plan")
     application_record = state.get("application_record")
     checklist = state.get("checklist")
+    essay_draft = state.get("essay_draft")
+    essay_review = state.get("essay_review")
     scholarship = state.get("target_scholarship") or {}
 
-    if checklist:
+    if essay_review:
+        strengths = "\n".join(f"- {s}" for s in essay_review.get("strengths", []))
+        weaknesses = "\n".join(f"- {w}" for w in essay_review.get("weaknesses", []))
+        suggestions = "\n".join(f"- {s}" for s in essay_review.get("suggestions", []))
+        prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
+
+We reviewed their essay. Score: {essay_review.get('score')}/100
+Alignment: {essay_review.get('alignment')}
+
+Strengths:
+{strengths}
+
+Weaknesses:
+{weaknesses}
+
+Suggestions:
+{suggestions}
+
+Write a warm 4-6 sentence response that:
+1. Opens with the score and alignment verdict
+2. Highlights the strongest point
+3. Honestly names the top weakness
+4. Gives the 2 most impactful suggestions as concrete next actions
+
+Do NOT rewrite the essay."""
+    elif essay_draft:
+        excerpt = essay_draft[:400] + ("..." if len(essay_draft) > 400 else "")
+        prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
+
+We generated a first draft of their Statement of Purpose for
+{scholarship.get('name', 'the scholarship')}. Opening excerpt:
+
+"{excerpt}"
+
+Write a warm 4-5 sentence response that:
+1. Tells them a draft is ready and saved to their application
+2. Mentions the length (approx {len(essay_draft.split())} words)
+3. Recommends reviewing it and offers to run a review ("ask me to review my essay")
+4. Suggests they personalize the concrete details
+
+Do NOT reprint the full essay - it's already in their dashboard."""
+    elif checklist:
         required = [c for c in checklist if c.get("required")]
         optional = [c for c in checklist if not c.get("required")]
         req_text = "\n".join(
@@ -412,22 +595,18 @@ def planner_node(state: AgentState):
         )
         prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
 
-We generated a document checklist for their application to:
+We generated a document checklist for:
 {scholarship.get('name', 'this scholarship')} (deadline {scholarship.get('deadline', 'unknown')}).
 
-Required documents:
+Required:
 {req_text}
 
-Optional documents:
+Optional:
 {opt_text if opt_text else "(none)"}
 
-Write a warm 4-6 sentence response that:
-1. Opens with how many required documents they need
-2. Groups them into a "start with these 3" suggestion (identity + academic first)
-3. Mentions that they can tick items off from their dashboard
-4. Ends with one clear first action they can take today
-
-Do not reprint the entire list - summarize."""
+Write a warm 4-6 sentence response opening with the number of required docs,
+suggesting which 3 to start with, reminding them they can tick items in the
+dashboard, and ending with one clear action."""
     elif application_record and not application_record.get("error"):
         prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
 
@@ -436,20 +615,16 @@ Scholarship: {application_record.get('scholarship_name')}
 Status: {application_record.get('status')}
 Application ID: {application_record.get('id')}
 
-Write a friendly 3-5 sentence confirmation that:
-1. Confirms the application is now tracked
-2. States the current status
-3. Tells them what they can do next (update status, view checklist)
-4. Mentions the deadline {scholarship.get('deadline', 'for this scholarship')}
-
-Be warm and brief."""
+Write a friendly 3-5 sentence confirmation that confirms it's tracked,
+states the current status, suggests next actions (checklist, essay draft),
+and mentions the deadline {scholarship.get('deadline', 'for this scholarship')}."""
     elif application_record and application_record.get("error"):
         prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
 
 We could not save their application: {application_record.get('error')}
 
-Write a short 2-3 sentence response explaining this and asking them to provide
-their email (register via POST /students) and the scholarship name."""
+Write a short 2-3 sentence response explaining this and asking them to
+register via POST /students and name the scholarship."""
     elif application_plan and application_plan.get("milestones"):
         milestones_text = "\n".join(
             f"Week {m.get('week')}: {m.get('title')} ({m.get('focus', 'misc')})\n"
@@ -477,9 +652,9 @@ Key dates:
 Risks:
 {risks_text}
 
-Write a warm 5-7 sentence response opening with weeks remaining, summarizing the
-first 2 milestones, warning about the top 1-2 risks, and ending with one
-"start today" action. Do not reprint the whole table."""
+Write a warm 5-7 sentence response opening with weeks remaining, summarizing
+the first 2 milestones, warning about the top 1-2 risks, and ending with one
+"start today" action."""
     elif eligibility:
         prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
 
@@ -494,14 +669,15 @@ Write a friendly 4-6 sentence response with the verdict, top reasons, top gaps, 
 Scholarships found:
 {tool_result}
 
-Write a short friendly response summarizing them with deadlines and offering eligibility checks or a plan."""
+Write a short friendly response summarizing them with deadlines and offering
+eligibility checks, a plan, or a draft essay."""
     else:
         prompt = f"""You are ScholarMate AI.
 
 The student asked: "{goal}"
 
-Write a helpful 3-5 sentence response with 2-3 concrete next steps.
-Mention scholarship search, eligibility check, application plan, and tracking."""
+Write a helpful 3-5 sentence response with 2-3 concrete next steps. Mention
+scholarship search, eligibility, planning, documents, essay drafting, and tracking."""
 
     try:
         response = llm.invoke(prompt)
@@ -534,4 +710,8 @@ def route_after_classify(state: AgentState) -> str:
         return "tracker"
     if tool == "prepare_documents":
         return "checklist"
+    if tool == "write_essay":
+        return "essay_draft"
+    if tool == "review_essay":
+        return "essay_review"
     return "planner"

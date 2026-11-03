@@ -1,12 +1,17 @@
 """
 Application persistence service.
 
+Responsibilities:
 - create a tracked application for a student + scholarship
-- update its status / notes
+- update status / notes
 - list all applications for a student
 - fetch a single application by id
+- replace the document checklist
+- toggle one checklist item done/undone
+- save the essay draft
+- save the essay review
 
-Keeps DB logic out of agent nodes.
+Keeps all MongoDB-specific logic out of the agent nodes.
 """
 
 from datetime import datetime, timezone
@@ -28,7 +33,11 @@ VALID_STATUSES = {
 }
 
 
+# ---------------------------------------------------------------- #
+# Internal helpers
+# ---------------------------------------------------------------- #
 def _clean(doc: dict | None) -> dict | None:
+    """Strip `_id` and expose it as `id` (string)."""
     if not doc:
         return None
     out = {k: v for k, v in doc.items() if k != "_id"}
@@ -37,6 +46,9 @@ def _clean(doc: dict | None) -> dict | None:
     return out
 
 
+# ---------------------------------------------------------------- #
+# Reads
+# ---------------------------------------------------------------- #
 async def get_application_by_id(application_id: str) -> dict | None:
     db = get_db()
     if db is None:
@@ -62,6 +74,20 @@ async def find_application(
     return _clean(doc)
 
 
+async def list_applications(student_email: str) -> list[dict]:
+    db = get_db()
+    if db is None:
+        return []
+    cursor = db.applications.find(
+        {"student_email": student_email}
+    ).sort("updated_at", -1)
+    docs = await cursor.to_list(length=200)
+    return [_clean(d) for d in docs]
+
+
+# ---------------------------------------------------------------- #
+# Writes
+# ---------------------------------------------------------------- #
 async def create_application(
     student_email: str,
     scholarship: dict,
@@ -83,12 +109,14 @@ async def create_application(
         "eligibility": eligibility,
         "application_plan": application_plan,
         "checklist": [],
+        "essay_draft": None,
+        "essay_review": None,
         "notes": "",
         "created_at": now,
         "updated_at": now,
     }
 
-    result = await db.applications.update_one(
+    await db.applications.update_one(
         {
             "student_email": student_email,
             "scholarship_slug": scholarship.get("slug"),
@@ -124,16 +152,10 @@ async def update_application(
     return await get_application_by_id(application_id)
 
 
-async def list_applications(student_email: str) -> list[dict]:
-    db = get_db()
-    if db is None:
-        return []
-    cursor = db.applications.find(
-        {"student_email": student_email}
-    ).sort("updated_at", -1)
-    docs = await cursor.to_list(length=200)
-    return [_clean(d) for d in docs]
-    async def set_checklist(
+# ---------------------------------------------------------------- #
+# Checklist
+# ---------------------------------------------------------------- #
+async def set_checklist(
     application_id: str, checklist: list[dict]
 ) -> dict | None:
     """Replace the whole checklist for an application."""
@@ -192,6 +214,57 @@ async def toggle_checklist_item(
         {
             "$set": {
                 "checklist": checklist,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    return await get_application_by_id(application_id)
+
+
+# ---------------------------------------------------------------- #
+# Essay
+# ---------------------------------------------------------------- #
+async def save_essay_draft(
+    application_id: str, draft: str
+) -> dict | None:
+    """Save an essay draft on the tracked application."""
+    db = get_db()
+    if db is None:
+        return None
+    try:
+        oid = ObjectId(application_id)
+    except Exception:
+        return None
+
+    await db.applications.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "essay_draft": draft,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    return await get_application_by_id(application_id)
+
+
+async def save_essay_review(
+    application_id: str, review: dict
+) -> dict | None:
+    """Save the latest essay review on the tracked application."""
+    db = get_db()
+    if db is None:
+        return None
+    try:
+        oid = ObjectId(application_id)
+    except Exception:
+        return None
+
+    await db.applications.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "essay_review": review,
                 "updated_at": datetime.now(timezone.utc),
             }
         },

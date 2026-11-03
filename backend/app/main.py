@@ -6,6 +6,7 @@ ScholarMate AI — FastAPI entrypoint.
 - /students           : create a student profile
 - /applications       : list / get / patch a tracked application
 - /applications/{id}/checklist/{item_id} : toggle a checklist item
+- /applications/{id}/essay               : fetch essay draft + review
 """
 
 from contextlib import asynccontextmanager
@@ -47,6 +48,7 @@ class AgentRequest(BaseModel):
     user_goal: str
     student_email: str | None = None
     scholarship_name: str | None = None
+    draft: str | None = None
 
 
 class StudentCreate(BaseModel):
@@ -120,6 +122,8 @@ async def run_agent_default():
         "application_id": None,
         "application_record": None,
         "checklist": None,
+        "essay_draft": None,
+        "essay_review": None,
         "plan": "",
         "final_response": "",
     })
@@ -141,6 +145,8 @@ async def run_agent(req: AgentRequest):
         "application_id": None,
         "application_record": None,
         "checklist": None,
+        "essay_draft": req.draft,
+        "essay_review": None,
         "plan": "",
         "final_response": "",
     })
@@ -213,3 +219,14 @@ async def patch_checklist_item(
             detail="Application or checklist item not found",
         )
     return record
+
+
+@app.get("/applications/{application_id}/essay")
+async def get_essay(application_id: str):
+    record = await get_application_by_id(application_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return {
+        "essay_draft": record.get("essay_draft"),
+        "essay_review": record.get("essay_review"),
+    }
