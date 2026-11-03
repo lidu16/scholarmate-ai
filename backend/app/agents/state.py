@@ -16,5 +16,7 @@ class AgentState(TypedDict):
     checklist: Optional[list[dict[str, Any]]]
     essay_draft: Optional[str]
     essay_review: Optional[dict[str, Any]]
+    recommendations: Optional[list[dict[str, Any]]]
+    match_score: Optional[dict[str, Any]]
     plan: str
     final_response: str

@@ -10,6 +10,8 @@ from .nodes import (
     checklist_node,
     essay_draft_node,
     essay_review_node,
+    recommend_node,
+    match_score_node,
     planner_node,
     response_node,
     route_after_classify,
@@ -25,6 +27,8 @@ builder.add_node("tracker", tracker_node)
 builder.add_node("checklist", checklist_node)
 builder.add_node("essay_draft", essay_draft_node)
 builder.add_node("essay_review", essay_review_node)
+builder.add_node("recommend", recommend_node)
+builder.add_node("match_score", match_score_node)
 builder.add_node("planner", planner_node)
 builder.add_node("response", response_node)
 
@@ -35,6 +39,8 @@ builder.add_conditional_edges(
     route_after_classify,
     {
         "tool": "tool",
+        "recommend": "recommend",
+        "match_score": "match_score",
         "eligibility": "eligibility",
         "application_plan": "application_plan",
         "tracker": "tracker",
@@ -45,13 +51,13 @@ builder.add_conditional_edges(
     },
 )
 
-builder.add_edge("tool", "planner")
-builder.add_edge("eligibility", "planner")
-builder.add_edge("application_plan", "planner")
-builder.add_edge("tracker", "planner")
-builder.add_edge("checklist", "planner")
-builder.add_edge("essay_draft", "planner")
-builder.add_edge("essay_review", "planner")
+for node in [
+    "tool", "recommend", "match_score", "eligibility",
+    "application_plan", "tracker", "checklist",
+    "essay_draft", "essay_review",
+]:
+    builder.add_edge(node, "planner")
+
 builder.add_edge("planner", "response")
 builder.add_edge("response", END)
 

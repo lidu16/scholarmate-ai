@@ -124,6 +124,8 @@ async def run_agent_default():
         "checklist": None,
         "essay_draft": None,
         "essay_review": None,
+        "recommendations": None,
+        "match_score": None,
         "plan": "",
         "final_response": "",
     })
@@ -147,6 +149,8 @@ async def run_agent(req: AgentRequest):
         "checklist": None,
         "essay_draft": req.draft,
         "essay_review": None,
+        "recommendations": None,
+        "match_score": None,
         "plan": "",
         "final_response": "",
     })
