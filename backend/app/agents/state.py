@@ -11,5 +11,7 @@ class AgentState(TypedDict):
     target_scholarship: Optional[dict[str, Any]]
     eligibility: Optional[dict[str, Any]]
     application_plan: Optional[dict[str, Any]]
+    application_id: Optional[str]
+    application_record: Optional[dict[str, Any]]
     plan: str
     final_response: str

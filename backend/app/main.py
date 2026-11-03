@@ -2,8 +2,10 @@
 ScholarMate AI — FastAPI entrypoint.
 
 - Lifespan connects to MongoDB Atlas (Motor) on startup.
-- /agent    : runs the LangGraph agent (search + eligibility + application plan)
-- /students : creates a student profile in MongoDB
+- /agent              : runs the LangGraph agent
+- /students           : create a student profile
+- /applications       : list a student's tracked applications
+- /applications/{id}  : get or update a tracked application
 """
 
 from contextlib import asynccontextmanager
@@ -18,11 +20,14 @@ from app.database.connection import (
     close_mongo_connection,
     get_db,
 )
+from app.services.applications import (
+    list_applications,
+    update_application,
+    get_application_by_id,
+    VALID_STATUSES,
+)
 
 
-# ---------------------------------------------------------------- #
-# Lifespan — connect once at startup, close at shutdown
-# ---------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_to_mongo()
@@ -50,6 +55,11 @@ class StudentCreate(BaseModel):
     degree_level: str | None = None
 
 
+class ApplicationUpdate(BaseModel):
+    status: str | None = None
+    notes: str | None = None
+
+
 # ---------------------------------------------------------------- #
 # Health
 # ---------------------------------------------------------------- #
@@ -59,10 +69,9 @@ def root():
 
 
 # ---------------------------------------------------------------- #
-# Context loading helper
+# Context loading
 # ---------------------------------------------------------------- #
 async def _load_context(req: AgentRequest) -> dict:
-    """Load student profile + target scholarship from MongoDB if provided."""
     db = get_db()
     profile = None
     scholarship = None
@@ -102,6 +111,8 @@ async def run_agent_default():
         "target_scholarship": ctx["target_scholarship"],
         "eligibility": None,
         "application_plan": None,
+        "application_id": None,
+        "application_record": None,
         "plan": "",
         "final_response": "",
     })
@@ -120,6 +131,8 @@ async def run_agent(req: AgentRequest):
         "target_scholarship": ctx["target_scholarship"],
         "eligibility": None,
         "application_plan": None,
+        "application_id": None,
+        "application_record": None,
         "plan": "",
         "final_response": "",
     })
@@ -142,7 +155,40 @@ async def create_student(payload: StudentCreate):
     doc["created_at"] = datetime.utcnow()
     result = await db.students.insert_one(doc)
 
-    return {
-        "id": str(result.inserted_id),
-        **doc,
-    }
+    return {"id": str(result.inserted_id), **doc}
+
+
+# ---------------------------------------------------------------- #
+# Applications
+# ---------------------------------------------------------------- #
+@app.get("/applications")
+async def get_applications(student_email: str):
+    if not student_email:
+        raise HTTPException(status_code=400, detail="student_email required")
+    return await list_applications(student_email)
+
+
+@app.get("/applications/{application_id}")
+async def get_application(application_id: str):
+    record = await get_application_by_id(application_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return record
+
+
+@app.patch("/applications/{application_id}")
+async def patch_application(application_id: str, payload: ApplicationUpdate):
+    if payload.status and payload.status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Allowed: {sorted(VALID_STATUSES)}",
+        )
+
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    record = await update_application(application_id, updates)
+    if not record:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return record
