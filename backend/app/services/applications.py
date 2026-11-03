@@ -133,3 +133,67 @@ async def list_applications(student_email: str) -> list[dict]:
     ).sort("updated_at", -1)
     docs = await cursor.to_list(length=200)
     return [_clean(d) for d in docs]
+    async def set_checklist(
+    application_id: str, checklist: list[dict]
+) -> dict | None:
+    """Replace the whole checklist for an application."""
+    db = get_db()
+    if db is None:
+        return None
+    try:
+        oid = ObjectId(application_id)
+    except Exception:
+        return None
+
+    await db.applications.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "checklist": checklist,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    return await get_application_by_id(application_id)
+
+
+async def toggle_checklist_item(
+    application_id: str, item_id: str, done: bool
+) -> dict | None:
+    """Mark one checklist item done/undone."""
+    db = get_db()
+    if db is None:
+        return None
+    try:
+        oid = ObjectId(application_id)
+    except Exception:
+        return None
+
+    doc = await db.applications.find_one({"_id": oid})
+    if not doc:
+        return None
+
+    checklist = doc.get("checklist", [])
+    found = False
+    for item in checklist:
+        if item.get("id") == item_id:
+            item["done"] = done
+            item["completed_at"] = (
+                datetime.now(timezone.utc) if done else None
+            )
+            found = True
+            break
+
+    if not found:
+        return None
+
+    await db.applications.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "checklist": checklist,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    return await get_application_by_id(application_id)

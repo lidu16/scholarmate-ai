@@ -7,6 +7,7 @@ Flow:
         ├── eligibility_check   -> eligibility      -> planner
         ├── application_plan    -> application_plan -> planner
         ├── track_application   -> tracker          -> planner
+        ├── prepare_documents   -> checklist        -> planner
         └── planning/general    ->                    planner
     planner -> response -> END
 """
@@ -15,7 +16,8 @@ from .state import AgentState
 from ..tools.scholarship_search import search_scholarships
 from ..services.eligibility import evaluate_eligibility
 from ..services.application_planner import build_application_plan
-from ..services.applications import create_application
+from ..services.checklist import generate_checklist
+from ..services.applications import create_application, set_checklist
 from ..database.connection import get_db
 from ..config.llm import get_llm
 
@@ -23,7 +25,7 @@ llm = get_llm(temperature=0.2)
 
 
 # ---------------------------------------------------------------- #
-# Node 1 — Intent classifier (Gemini)
+# Node 1 — Intent classifier
 # ---------------------------------------------------------------- #
 def classifier_node(state: AgentState):
     goal = state["user_goal"]
@@ -36,6 +38,8 @@ Classify the user's goal into EXACTLY ONE of these intents:
 - "application_plan"   : user wants a plan, timeline, roadmap, or preparation steps
                          to apply for a specific scholarship
 - "track_application"  : user wants to save, track, or follow an application
+- "prepare_documents"  : user wants to know which documents are needed,
+                         what to prepare, or a document checklist
 - "planning"           : general application advice not tied to a scholarship
 - "general"            : anything else
 
@@ -55,6 +59,7 @@ Intent:"""
         "eligibility_check",
         "application_plan",
         "track_application",
+        "prepare_documents",
         "planning",
         "general",
     }
@@ -66,6 +71,7 @@ Intent:"""
         "eligibility_check",
         "application_plan",
         "track_application",
+        "prepare_documents",
     }
     tool_name = intent if needs_tool else None
 
@@ -300,7 +306,89 @@ async def tracker_node(state: AgentState):
 
 
 # ---------------------------------------------------------------- #
-# Node 3 — Planner / response generator
+# Node 2e — Checklist
+# ---------------------------------------------------------------- #
+async def checklist_node(state: AgentState):
+    """
+    Generate a scholarship-specific document checklist and attach it
+    to the student's tracked application (creating the application if needed).
+    """
+    db = get_db()
+    if db is None:
+        return {
+            "checklist": [],
+            "application_record": {"error": "Database not connected."},
+        }
+
+    profile = state.get("student_profile")
+    if not profile:
+        return {
+            "checklist": [],
+            "application_record": {
+                "error": "No student profile — register first via POST /students.",
+            },
+        }
+
+    scholarship = state.get("target_scholarship")
+    if not scholarship:
+        goal = state["user_goal"]
+        try:
+            words = [w for w in goal.split() if len(w) > 3]
+            if words:
+                regex = "|".join(words)
+                scholarship = await db.scholarships.find_one(
+                    {"name": {"$regex": regex, "$options": "i"}},
+                    {"_id": 0},
+                )
+        except Exception:
+            scholarship = None
+
+    if not scholarship:
+        return {
+            "checklist": [],
+            "application_record": {
+                "error": "Could not identify a scholarship to build a checklist for.",
+            },
+        }
+
+    profile_clean = {k: v for k, v in profile.items() if k != "_id"}
+
+    eligibility = state.get("eligibility")
+    if not eligibility:
+        eligibility = await evaluate_eligibility(profile_clean, scholarship)
+
+    checklist = await generate_checklist(profile_clean, scholarship, eligibility)
+
+    application_record = state.get("application_record")
+    application_id = state.get("application_id")
+
+    if not application_record or application_record.get("error"):
+        application_record = await create_application(
+            student_email=profile_clean["email"],
+            scholarship=scholarship,
+            eligibility=eligibility,
+            application_plan=state.get("application_plan"),
+            status="preparing",
+        )
+        application_id = application_record.get("id")
+
+    if application_id:
+        updated = await set_checklist(application_id, checklist)
+        if updated:
+            application_record = updated
+
+    return {
+        "student_profile": profile_clean,
+        "target_scholarship": scholarship,
+        "eligibility": eligibility,
+        "application_id": application_id,
+        "application_record": application_record,
+        "checklist": checklist,
+    }
+
+
+# ---------------------------------------------------------------- #
+# Node 3 — Planner
 # ---------------------------------------------------------------- #
 def planner_node(state: AgentState):
     goal = state["user_goal"]
@@ -308,9 +396,39 @@ def planner_node(state: AgentState):
     eligibility = state.get("eligibility")
     application_plan = state.get("application_plan")
     application_record = state.get("application_record")
+    checklist = state.get("checklist")
     scholarship = state.get("target_scholarship") or {}
 
-    if application_record and not application_record.get("error"):
+    if checklist:
+        required = [c for c in checklist if c.get("required")]
+        optional = [c for c in checklist if not c.get("required")]
+        req_text = "\n".join(
+            f"- [ ] {c['name']} ({c['category']}) — {c.get('description', '')}"
+            for c in required
+        )
+        opt_text = "\n".join(
+            f"- [ ] {c['name']} ({c['category']})"
+            for c in optional
+        )
+        prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
+
+We generated a document checklist for their application to:
+{scholarship.get('name', 'this scholarship')} (deadline {scholarship.get('deadline', 'unknown')}).
+
+Required documents:
+{req_text}
+
+Optional documents:
+{opt_text if opt_text else "(none)"}
+
+Write a warm 4-6 sentence response that:
+1. Opens with how many required documents they need
+2. Groups them into a "start with these 3" suggestion (identity + academic first)
+3. Mentions that they can tick items off from their dashboard
+4. Ends with one clear first action they can take today
+
+Do not reprint the entire list - summarize."""
+    elif application_record and not application_record.get("error"):
         prompt = f"""You are ScholarMate AI. The student asked: "{goal}"
 
 We just saved their application to track it. Stored record:
@@ -414,4 +532,6 @@ def route_after_classify(state: AgentState) -> str:
         return "application_plan"
     if tool == "track_application":
         return "tracker"
+    if tool == "prepare_documents":
+        return "checklist"
     return "planner"

@@ -13,5 +13,6 @@ class AgentState(TypedDict):
     application_plan: Optional[dict[str, Any]]
     application_id: Optional[str]
     application_record: Optional[dict[str, Any]]
+    checklist: Optional[list[dict[str, Any]]]
     plan: str
     final_response: str

@@ -4,8 +4,8 @@ ScholarMate AI — FastAPI entrypoint.
 - Lifespan connects to MongoDB Atlas (Motor) on startup.
 - /agent              : runs the LangGraph agent
 - /students           : create a student profile
-- /applications       : list a student's tracked applications
-- /applications/{id}  : get or update a tracked application
+- /applications       : list / get / patch a tracked application
+- /applications/{id}/checklist/{item_id} : toggle a checklist item
 """
 
 from contextlib import asynccontextmanager
@@ -24,6 +24,8 @@ from app.services.applications import (
     list_applications,
     update_application,
     get_application_by_id,
+    set_checklist,
+    toggle_checklist_item,
     VALID_STATUSES,
 )
 
@@ -58,6 +60,10 @@ class StudentCreate(BaseModel):
 class ApplicationUpdate(BaseModel):
     status: str | None = None
     notes: str | None = None
+
+
+class ChecklistToggle(BaseModel):
+    done: bool
 
 
 # ---------------------------------------------------------------- #
@@ -113,6 +119,7 @@ async def run_agent_default():
         "application_plan": None,
         "application_id": None,
         "application_record": None,
+        "checklist": None,
         "plan": "",
         "final_response": "",
     })
@@ -133,6 +140,7 @@ async def run_agent(req: AgentRequest):
         "application_plan": None,
         "application_id": None,
         "application_record": None,
+        "checklist": None,
         "plan": "",
         "final_response": "",
     })
@@ -191,4 +199,17 @@ async def patch_application(application_id: str, payload: ApplicationUpdate):
     record = await update_application(application_id, updates)
     if not record:
         raise HTTPException(status_code=404, detail="Application not found")
+    return record
+
+
+@app.patch("/applications/{application_id}/checklist/{item_id}")
+async def patch_checklist_item(
+    application_id: str, item_id: str, payload: ChecklistToggle
+):
+    record = await toggle_checklist_item(application_id, item_id, payload.done)
+    if not record:
+        raise HTTPException(
+            status_code=404,
+            detail="Application or checklist item not found",
+        )
     return record

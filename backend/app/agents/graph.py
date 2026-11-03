@@ -7,6 +7,7 @@ from .nodes import (
     eligibility_node,
     application_plan_node,
     tracker_node,
+    checklist_node,
     planner_node,
     response_node,
     route_after_classify,
@@ -19,6 +20,7 @@ builder.add_node("tool", tool_node)
 builder.add_node("eligibility", eligibility_node)
 builder.add_node("application_plan", application_plan_node)
 builder.add_node("tracker", tracker_node)
+builder.add_node("checklist", checklist_node)
 builder.add_node("planner", planner_node)
 builder.add_node("response", response_node)
 
@@ -32,6 +34,7 @@ builder.add_conditional_edges(
         "eligibility": "eligibility",
         "application_plan": "application_plan",
         "tracker": "tracker",
+        "checklist": "checklist",
         "planner": "planner",
     },
 )
@@ -40,6 +43,7 @@ builder.add_edge("tool", "planner")
 builder.add_edge("eligibility", "planner")
 builder.add_edge("application_plan", "planner")
 builder.add_edge("tracker", "planner")
+builder.add_edge("checklist", "planner")
 builder.add_edge("planner", "response")
 builder.add_edge("response", END)
 
