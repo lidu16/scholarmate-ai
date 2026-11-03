@@ -2,7 +2,7 @@
 ScholarMate AI — FastAPI entrypoint.
 
 - Lifespan connects to MongoDB Atlas (Motor) on startup.
-- /agent    : runs the LangGraph agent (Gemini + tool + async DB search)
+- /agent    : runs the LangGraph agent (search + eligibility + application plan)
 - /students : creates a student profile in MongoDB
 """
 
@@ -34,10 +34,12 @@ app = FastAPI(title="ScholarMate AI", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------- #
-# Request/Response schemas
+# Schemas
 # ---------------------------------------------------------------- #
 class AgentRequest(BaseModel):
     user_goal: str
+    student_email: str | None = None
+    scholarship_name: str | None = None
 
 
 class StudentCreate(BaseModel):
@@ -57,17 +59,49 @@ def root():
 
 
 # ---------------------------------------------------------------- #
+# Context loading helper
+# ---------------------------------------------------------------- #
+async def _load_context(req: AgentRequest) -> dict:
+    """Load student profile + target scholarship from MongoDB if provided."""
+    db = get_db()
+    profile = None
+    scholarship = None
+
+    if req.student_email and db is not None:
+        profile = await db.students.find_one(
+            {"email": req.student_email}, {"_id": 0}
+        )
+
+    if req.scholarship_name and db is not None:
+        scholarship = await db.scholarships.find_one(
+            {"name": {"$regex": req.scholarship_name, "$options": "i"}},
+            {"_id": 0},
+        )
+
+    return {
+        "student_profile": profile,
+        "target_scholarship": scholarship,
+    }
+
+
+# ---------------------------------------------------------------- #
 # Agent endpoints
 # ---------------------------------------------------------------- #
 @app.get("/agent")
 async def run_agent_default():
-    """Quick GET test with a default goal."""
+    ctx = await _load_context(
+        AgentRequest(user_goal="Find AI scholarships in Germany")
+    )
     return await graph.ainvoke({
         "user_goal": "Find AI scholarships in Germany",
         "intent": "",
         "needs_tool": False,
         "tool_name": None,
         "tool_result": None,
+        "student_profile": ctx["student_profile"],
+        "target_scholarship": ctx["target_scholarship"],
+        "eligibility": None,
+        "application_plan": None,
         "plan": "",
         "final_response": "",
     })
@@ -75,13 +109,17 @@ async def run_agent_default():
 
 @app.post("/agent")
 async def run_agent(req: AgentRequest):
-    """Main agent endpoint — accepts any user goal."""
+    ctx = await _load_context(req)
     return await graph.ainvoke({
         "user_goal": req.user_goal,
         "intent": "",
         "needs_tool": False,
         "tool_name": None,
         "tool_result": None,
+        "student_profile": ctx["student_profile"],
+        "target_scholarship": ctx["target_scholarship"],
+        "eligibility": None,
+        "application_plan": None,
         "plan": "",
         "final_response": "",
     })
